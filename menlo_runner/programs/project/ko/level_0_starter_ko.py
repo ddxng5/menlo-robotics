@@ -245,34 +245,13 @@ async def decide_next_action(
     - parse_agent_decision으로 검증한 뒤 실행하세요.
     - delivery limit 또는 priority color 같은 hidden task variation도 해석하세요.
 
-    아래 fallback은 의도적으로 단순합니다. 제출 전 반드시 교체하세요.
+    아래 placeholder는 안전하게 stop합니다. 제출 전에는 실제 LLM call로
+    교체하세요. 고정 action sequence를 hard-code하지 마세요.
     """
-    context = build_decision_context(task, observation, memory, last_result)
-
-    if context["held_cube"]:
-        held_color = context["held_cube"]["color"]
-        return AgentDecision(
-            next_action="navigate_to_pad",
-            target_color=held_color,
-            target_entity_id=COLOR_TO_PAD.get(held_color),
-            reason="Fallback: holding a cube, so navigate to its matching pad.",
-        )
-
-    remaining = [
-        cube
-        for cube in observation.visible_cubes
-        if cube["entity_id"] not in memory.completed_cube_ids
-        and cube["entity_id"] not in memory.skipped_cube_ids
-    ]
-    if not remaining:
-        return AgentDecision(next_action="stop", reason="Fallback: no visible cubes remain.")
-
-    cube = remaining[0]
+    _decision_context = build_decision_context(task, observation, memory, last_result)
     return AgentDecision(
-        next_action="navigate_to_cube",
-        target_color=cube["color"],
-        target_entity_id=cube["entity_id"],
-        reason="Fallback: choose the first visible cube.",
+        next_action="stop",
+        reason="TODO: call the text LLM, validate its JSON decision, then execute it.",
     )
 
 
@@ -300,48 +279,19 @@ async def execute_decision(
     """검증된 LLM decision 하나를 Level 0 robot action으로 변환합니다.
 
     TODO:
-    - target_entity_id가 존재하고 target_color와 맞는지 검증하세요.
-    - skip/recover/stop에 대한 팀의 policy를 구현하세요.
-    - 고정 script가 아니라 LLM과 memory가 다음 고수준 단계를 고르게 하세요.
+    - 선택한 target이 observation과 일치하는지 검증하세요.
+    - 필요할 때 go_to_entity, pick_cube_by_id, place_on_pad_by_id를 사용하세요.
+    - search/recover/skip/stop에 대한 팀의 policy를 구현하세요.
+    - 고정 script가 아니라 LLM과 memory가 고수준 sequence를 고르게 하세요.
     """
-    if decision.next_action == "navigate_to_cube":
-        if not decision.target_entity_id:
-            return {"action": decision.next_action, "status": "failed", "reason": "missing cube id"}
-        result = await go_to_entity(ctx, decision.target_entity_id)
-        return {"action": "navigate_to_cube", "target": decision.target_entity_id, "result": result_summary(result)}
+    if decision.next_action == "stop":
+        return {"action": "stop", "status": "stopped"}
 
-    if decision.next_action == "pick_cube":
-        cube_id = decision.target_entity_id or memory.active_cube_id
-        if not cube_id:
-            return {"action": "pick_cube", "status": "failed", "reason": "missing cube id"}
-        result = await pick_cube_by_id(ctx, cube_id)
-        return {"action": "pick_cube", "target": cube_id, "result": result_summary(result)}
-
-    if decision.next_action == "navigate_to_pad":
-        pad_id = decision.target_entity_id
-        if pad_id is None and decision.target_color:
-            pad_id = COLOR_TO_PAD.get(decision.target_color)
-        if not pad_id:
-            return {"action": "navigate_to_pad", "status": "failed", "reason": "missing pad id"}
-        result = await go_to_entity(ctx, pad_id)
-        return {"action": "navigate_to_pad", "target": pad_id, "result": result_summary(result)}
-
-    if decision.next_action == "place_cube":
-        pad_id = decision.target_entity_id
-        if pad_id is None and (memory.held_color or decision.target_color):
-            pad_id = COLOR_TO_PAD.get(memory.held_color or decision.target_color or "")
-        if not pad_id:
-            return {"action": "place_cube", "status": "failed", "reason": "missing pad id"}
-        result = await place_on_pad_by_id(ctx, pad_id)
-        return {"action": "place_cube", "target": pad_id, "result": result_summary(result)}
-
-    if decision.next_action in {"search_cube", "search_pad"}:
-        return {"action": decision.next_action, "status": "observed_full_state"}
-
-    if decision.next_action == "recover":
-        return {"action": "recover", "status": "todo", "strategy": decision.recovery_strategy}
-
-    return {"action": decision.next_action, "status": "no_op"}
+    return {
+        "action": decision.next_action,
+        "status": "todo",
+        "reason": "Implement Level 0 action execution for this validated decision.",
+    }
 
 
 async def verify_outcome(ctx: Any, decision: AgentDecision, action_result: dict[str, Any]) -> dict[str, Any]:
@@ -375,23 +325,6 @@ def update_memory(
     - hidden task modifier를 delivery_limit과 priority_colors로 반영하세요.
     - 발표에서 보여줄 수 있는 간결한 log를 남기세요.
     """
-    held = verified.get("held_cube") or observation.held_cube
-    memory.held_entity_id = held["entity_id"] if held else None
-    memory.held_color = held["color"] if held else None
-    memory.delivered_count = len(verified.get("delivered_cube_ids", observation.delivered_cube_ids))
-    memory.completed_cube_ids = list(verified.get("delivered_cube_ids", observation.delivered_cube_ids))
-
-    if decision.next_action == "navigate_to_cube":
-        memory.active_cube_id = decision.target_entity_id
-        memory.active_color = decision.target_color
-        memory.stage = "near_cube"
-    elif decision.next_action == "pick_cube" and memory.held_color:
-        memory.stage = "holding_cube"
-    elif decision.next_action == "place_cube":
-        memory.stage = "need_cube"
-        memory.active_cube_id = None
-        memory.active_color = None
-
     memory.logs.append(
         {
             "observation": {

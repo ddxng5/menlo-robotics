@@ -340,8 +340,8 @@ Final evaluation은 다음 조건으로 진행됩니다.
 - robot status, action result, camera observation으로 실행 결과 검증
 - observation, LLM decision, executed action, outcome log 유지
 - navigation, pick, place 실패에서 적절히 recovery
-- 설계 결정과 구현 접근 방식 설명
-- 현재 접근 방식의 한계 논의
+- 중간 발표와 최종 발표에서 project code를 실행하여 로봇 동작 시연
+- presentation slide로 중간 발표와 최종 발표의 필수 발표 항목 요약
 
 ## 평가 기준
 
@@ -352,7 +352,7 @@ Final evaluation은 다음 조건으로 진행됩니다.
 | 1. Task Performance | 올바르게 분류한 큐브 수와 delivery당 평균 LLM decision cycle 수 | 40 |
 | 2. Project Level | 선택한 project level의 성공적 수행 | 30 |
 | 3. Hidden Task Adaptation | final hidden natural-language instruction 대응 성능 | 20 |
-| 4. Engineering and Presentation | 시스템 설계, 구현 결정, 논의 | 10 |
+| 4. Engineering and Presentation | 코드 실행 시연과 발표 요약 | 10 |
 | 합계 |  | 100 |
 
 ### 1. Task Performance: 40점
@@ -402,12 +402,18 @@ Task Performance는 두 요소로 평가됩니다.
 
 ### 4. Engineering and Presentation: 10점
 
-팀은 다음을 명확히 발표해야 합니다.
+팀은 project code를 실행하여 로봇 동작을 시연해야 합니다. Presentation slide는 세부 구현 설명보다 다음 핵심 항목을 요약하는 데 집중합니다.
 
-- 전체 시스템 아키텍처
-- 주요 설계 결정
-- 구현 highlight
-- 시스템 안에서 LLM의 역할
-- validation 및 recovery 전략
-- 현재 접근 방식의 한계
-- simulated environment를 넘어 실제 AI-agentic robotics에 적용할 수 있는 방법
+중간 발표:
+
+- 구현한 로봇 동작 흐름
+- LLM 역할
+- 현재 성공한 점 / 부족한 점
+- 개선 계획
+
+최종 발표:
+
+- 전체 로봇 동작 흐름
+- LLM 역할
+- 개선한 점 / 현 시스템의 한계
+- 실제 AI 에이전트 기반 로봇으로의 활용 방안

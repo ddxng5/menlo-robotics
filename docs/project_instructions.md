@@ -367,8 +367,8 @@ All teams must:
 - Verify execution outcomes using robot status, action results, and camera observations.
 - Maintain execution logs containing observations, LLM decisions, executed actions, and outcomes.
 - Recover appropriately from failed navigation, pick, and place actions.
-- Explain their design decisions and implementation approach.
-- Discuss project limitations.
+- Demonstrate the robot behavior by running the project code during the interim and final presentations.
+- Use presentation slides to summarize the required interim and final presentation topics.
 
 ## Evaluation Criteria
 
@@ -379,7 +379,7 @@ Teams are evaluated across four categories for a total of 100 points.
 | 1. Task Performance | Correctly sorted cubes and average LLM decision cycles per delivered cube | 40 |
 | 2. Project Level | Successfully completing the selected project level | 30 |
 | 3. Hidden Task Adaptation | Performance on the hidden final natural-language instruction | 20 |
-| 4. Engineering and Presentation | System design, implementation decisions, and discussion | 10 |
+| 4. Engineering and Presentation | Code demonstration and presentation summary | 10 |
 | Total |  | 100 |
 
 ### 1. Task Performance: 40 Points
@@ -429,12 +429,18 @@ Possible variation types include:
 
 ### 4. Engineering and Presentation: 10 Points
 
-Teams should clearly present:
+Teams should demonstrate their robot behavior by running the project code. Presentation slides should focus on the following summary topics rather than detailed implementation walkthroughs.
 
-- Overall system architecture
-- Key design decisions
-- Implementation highlights
-- Role of the LLM within the system
-- Validation and recovery strategy
-- Limitations of the current approach
-- How the solution could be adapted to real-world AI-agentic robotic applications beyond the simulated environment
+Interim presentation:
+
+- Implemented robot action flow
+- Role of the LLM
+- Current successes and limitations
+- Improvement plan
+
+Final presentation:
+
+- Complete robot action flow
+- Role of the LLM
+- Improvements since the interim presentation and limitations of the current system
+- How the solution could be used or extended for real-world AI-agent-based robotics

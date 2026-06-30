@@ -21,6 +21,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from menlo_runner.completion import CompletionConfig, CompletionTracker
 from menlo_runner.llm import ask_vlm
 from menlo_runner.perception import detect_color_blobs
 
@@ -30,7 +31,7 @@ from menlo_runner.perception import detect_color_blobs
 # ---------------------------------------------------------------------------
 # Keep the task fixed. The challenge is to make one agent that handles different
 # cube-color orders and starting positions without source-code changes.
-TASK = "Find and sort the six cubes in the warehouse into their matching destination pads."
+TASK = "Find and sort cubes from the source area into their matching destination pads."
 
 # Fixed signage is allowed information. Do not turn this into exact coordinates
 # or entity IDs; use it only to interpret observations.
@@ -478,13 +479,30 @@ async def execute_decision(
     return {"action": decision.next_action, "status": "no_op"}
 
 
-async def run_agent(ctx: Any, *, max_cycles: int = 20) -> AgentMemory:
+async def run_agent(
+    ctx: Any,
+    *,
+    max_cycles: int = 20,
+    completion: CompletionConfig | None = None,
+) -> AgentMemory:
     """Thin observe-LLM-act loop. Edit the TODO functions, not just this loop."""
     memory = AgentMemory()
     last_result: dict[str, Any] | None = None
+    tracker = CompletionTracker(completion) if completion is not None else None
 
     for cycle in range(1, max_cycles + 1):
         print(f"\n[Level 1] Cycle {cycle}")
+        if tracker is not None:
+            first_cycle = tracker.started_at is None
+            tracker.start_first_cycle()
+            if first_cycle:
+                tracker.print_start()
+            reason = tracker.stop_reason(memory.delivered_count)
+            if reason is not None:
+                tracker.mark_ended(reason)
+                print(f"Completion target reached before cycle action: {reason}.")
+                break
+
         observation = await observe_world(ctx, memory)
         decision = await decide_next_action(TASK, observation, memory, last_result)
         print("LLM decision:", decision)
@@ -496,14 +514,26 @@ async def run_agent(ctx: Any, *, max_cycles: int = 20) -> AgentMemory:
         verified = await verify_outcome(ctx, decision, action_result)
         update_memory(memory, observation, decision, verified)
         last_result = verified
+        if tracker is not None:
+            reason = tracker.stop_reason(memory.delivered_count)
+            if reason is not None:
+                tracker.mark_ended(reason)
+                print(f"Completion target reached after cycle action: {reason}.")
+                break
 
+    if tracker is not None:
+        tracker.print_summary(memory.delivered_count)
     return memory
 
 
 async def run(ctx: Any) -> None:
     print(TASK)
     print("Running Level 1 adaptive-navigation project starter")
-    memory = await run_agent(ctx)
+    memory = await run_agent(
+        ctx,
+        max_cycles=10_000,
+        completion=CompletionConfig(level=1, max_elapsed_s=600),
+    )
     print("\nRun complete.")
     print(f"Delivered count: {memory.delivered_count}")
     print("Logs:")

@@ -4,7 +4,7 @@
 
 All teams receive the same natural-language task:
 
-> Find and sort the six cubes in the warehouse into their matching destination pads.
+> Find and sort cubes from the source area into their matching destination pads.
 
 Teams must build one general LLM-assisted robot agent that can complete the task under randomized cube colors and randomized robot starting positions without source-code changes.
 
@@ -14,7 +14,7 @@ The LLM serves as the high-level task supervisor throughout execution. It decide
 
 Each evaluation uses a static warehouse environment with:
 
-- Six cubes presented from the conveyor/cube source area
+- Cubes presented from the conveyor/cube source area
 - Randomized cube colors
 - Fixed destination pad locations
 - Fixed destination signage and color backgrounds
@@ -159,7 +159,6 @@ The LLM should make decisions such as:
 - Determining recovery behavior after failed navigation, pick, or place actions
 - Deciding whether to retry, skip, or stop
 - Using memory to improve future decisions
-- Interpreting hidden natural-language instructions during final evaluation
 
 Student code must validate every LLM response before execution.
 
@@ -187,28 +186,19 @@ skip_target
 stop
 ```
 
-`target_color` may be `null` when the action does not need a color. Additional fields such as `retry_limit`, `memory_update`, `priority_colors`, `delivery_limit`, or `recovery_strategy` are permitted.
+`target_color` may be `null` when the action does not need a color. Additional fields such as `retry_limit`, `memory_update`, or `recovery_strategy` are permitted.
 
 VLM usage is optional. Teams may use VLMs for richer scene understanding, including reading destination signs from camera frames. The required AI-agent component is still the structured text-LLM decision loop.
 
-A single LLM call at the beginning is not enough. The LLM must participate during task execution, especially for target selection, recovery, skipping, stopping, and hidden instruction adaptation.
+A single LLM call at the beginning is not enough. The LLM must participate during task execution, especially for target selection, recovery, skipping, and stopping.
 
-## Hidden Task Adaptation
+## Natural-Language Task Input
 
 The submitted agent must accept the natural-language task as input rather than hard-coding only the default objective.
-
-During the final evaluation, instructors may provide an additional hidden natural-language instruction that modifies the published task. Possible variation types include:
-
-- Delivering only a specified number of cubes
-- Prioritizing one or more cube colors
-
-The exact instruction remains hidden until the final evaluation. No source-code changes are permitted during evaluation, so teams should design their LLM prompt, decision schema, validation, and memory to support these variations.
 
 Examples of useful memory fields include:
 
 - `delivered_count`
-- `delivery_limit`
-- `priority_colors`
 - `held_color`
 - `completed_colors`
 - `failed_attempts`
@@ -336,7 +326,7 @@ The interim evaluation uses:
 
 The published task remains:
 
-> Find and sort the six cubes into their matching destination pads.
+> Find and sort cubes from the source area into their matching destination pads.
 
 All teams within the same project level are evaluated using the same hidden setup.
 
@@ -348,11 +338,10 @@ The final evaluation uses:
 
 - A different hidden cube-color configuration
 - A different hidden robot starting position
-- Optionally, one additional hidden natural-language instruction
 
 The published task remains:
 
-> Find and sort the six cubes into their matching destination pads.
+> Find and sort cubes from the source area into their matching destination pads.
 
 The final setup is different from the interim setup. No source-code changes are permitted during evaluation. Final results are used for judging.
 
@@ -372,62 +361,31 @@ All teams must:
 
 ## Evaluation Criteria
 
-Teams are evaluated across four categories for a total of 100 points.
+The final score is not capped at 100 points. Cube delivery points are earned within a 10-minute simulation run, and code quality and presentation points are added on top.
 
-| Category | Evaluation metric | Maximum points |
+| Category | Evaluation metric | Points |
 | --- | --- | --- |
-| 1. Task Performance | Correctly sorted cubes and average LLM decision cycles per delivered cube | 40 |
-| 2. Project Level | Successfully completing the selected project level | 30 |
-| 3. Hidden Task Adaptation | Performance on the hidden final natural-language instruction | 20 |
-| 4. Engineering and Presentation | Code demonstration and presentation summary | 10 |
-| Total |  | 100 |
+| 1. Cube Delivery | Successful deliveries within the 10-minute simulation run | Level-based, no maximum |
+| 2. Code Structure and Quality | Judge review of source code and runtime behavior | Up to 10 |
+| 3. Presentation | Theory, design decisions, robot behavior, reflection | Up to 10 |
 
-### 1. Task Performance: 40 Points
+### 1. Cube Delivery
 
-Task Performance is evaluated using two components.
+Each successful cube delivery completed within the 10-minute simulation run earns points based on the team's selected project level. There is no cap on the number of cube deliveries that may count.
 
-#### Task Completion: 30 Points
-
-Points are awarded based on the number of correctly sorted cubes completed within the evaluation time limit.
-
-| Correctly sorted cubes | Points |
-| --- | --- |
-| 0 | 0 |
-| 1 | 5 |
-| 2 | 10 |
-| 3 | 15 |
-| 4 | 20 |
-| 5 | 25 |
-| 6 | 30 |
-
-Incorrect placements may reduce credit or terminate the run depending on the benchmark rules.
-
-#### LLM Efficiency: 10 Points
-
-LLM efficiency is measured by the average number of LLM decision cycles required per successfully delivered cube. Teams are ranked according to this metric, with fewer average LLM decision cycles receiving higher scores.
-
-### 2. Project Level: 30 Points
-
-Teams may choose one project level:
-
-| Project level | Maximum points |
+| Project level | Points per successful delivery |
 | --- | --- |
 | Level 0: Full-State Agent | 10 |
 | Level 1: Adaptive Navigation Agent | 20 |
 | Level 2: Autonomous Vision Agent | 30 |
 
-Teams that successfully deliver at least three cubes using their selected level constraints are eligible to receive up to the corresponding maximum Project Level points.
+Incorrect placements may reduce credit or terminate the run depending on the benchmark rules.
 
-### 3. Hidden Task Adaptation: 20 Points
+### 2. Code Structure and Quality: 10 Points
 
-Teams are evaluated on their ability to correctly interpret and complete the final hidden natural-language modification without source-code changes.
+Judges award up to 10 points based on the submitted source code and observed runtime behavior.
 
-Possible variation types include:
-
-- Delivering only a specified number of cubes
-- Prioritizing one or more cube colors
-
-### 4. Engineering and Presentation: 10 Points
+### 3. Presentation: 10 Points
 
 Teams should demonstrate their robot behavior by running the project code. Presentation slides should focus on the following summary topics rather than detailed implementation walkthroughs.
 

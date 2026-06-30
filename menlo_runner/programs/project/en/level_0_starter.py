@@ -17,13 +17,14 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from menlo_runner.completion import CompletionConfig, CompletionTracker
 from menlo_runner.scene import COLOR_TO_PAD, delivered_cube_ids, held_cube_info, visible_cubes
 
 
 # ---------------------------------------------------------------------------
 # SUPPORT CODE: shared task definition and required LLM decision schema
 # ---------------------------------------------------------------------------
-TASK = "Find and sort the six cubes in the warehouse into their matching destination pads."
+TASK = "Find and sort cubes from the source area into their matching destination pads."
 
 DESTINATION_SIGN_RULES = {
     "red": "B",
@@ -61,8 +62,6 @@ class AgentMemory:
     """State your agent carries across observe-decide-act cycles."""
 
     delivered_count: int = 0
-    delivery_limit: int | None = None
-    priority_colors: list[str] = field(default_factory=list)
     held_color: str | None = None
     held_entity_id: str | None = None
     active_cube_id: str | None = None
@@ -140,8 +139,6 @@ def build_decision_context(
         "color_to_pad": observation.color_to_pad,
         "memory": {
             "delivered_count": memory.delivered_count,
-            "delivery_limit": memory.delivery_limit,
-            "priority_colors": memory.priority_colors,
             "held_color": memory.held_color,
             "held_entity_id": memory.held_entity_id,
             "active_cube_id": memory.active_cube_id,
@@ -243,7 +240,6 @@ async def decide_next_action(
     - Call menlo_runner.llm.call_llm or your approved LLM helper.
     - Require JSON with next_action, target_color, target_entity_id, and reason.
     - Validate with parse_agent_decision before execution.
-    - Interpret hidden task variations, such as delivery limits or priority colors.
 
     The placeholder below stops safely. Replace it with a real LLM call for
     submission; do not hard-code a fixed action sequence.
@@ -264,7 +260,7 @@ async def observe_world(ctx: Any, memory: AgentMemory) -> Observation:
 
     TODO:
     - Add natural-language task parsing results if useful.
-    - Add compact scene summaries or priority notes.
+    - Add compact scene summaries if useful.
     - Keep the observation small enough for repeated LLM calls.
     """
     return await observe_full_state(ctx)
@@ -322,7 +318,6 @@ def update_memory(
 
     TODO:
     - Track active cube, held cube, delivered count, failures, and skip history.
-    - Parse hidden task modifiers into delivery_limit and priority_colors.
     - Add concise logs that you can show during presentations.
     """
     memory.logs.append(
@@ -338,13 +333,31 @@ def update_memory(
     )
 
 
-async def run_agent(ctx: Any, *, task: str = TASK, max_cycles: int = 24) -> AgentMemory:
+async def run_agent(
+    ctx: Any,
+    *,
+    task: str = TASK,
+    max_cycles: int = 24,
+    completion: CompletionConfig | None = None,
+) -> AgentMemory:
     """Thin observe-LLM-act loop. Edit the TODO functions, not just this loop."""
     memory = AgentMemory()
     last_result: dict[str, Any] | None = None
+    tracker = CompletionTracker(completion) if completion is not None else None
 
     for cycle in range(1, max_cycles + 1):
         print(f"\n[Level 0] Cycle {cycle}")
+        if tracker is not None:
+            first_cycle = tracker.started_at is None
+            tracker.start_first_cycle()
+            if first_cycle:
+                tracker.print_start()
+            reason = tracker.stop_reason(memory.delivered_count)
+            if reason is not None:
+                tracker.mark_ended(reason)
+                print(f"Completion target reached before cycle action: {reason}.")
+                break
+
         observation = await observe_world(ctx, memory)
         decision = await decide_next_action(task, observation, memory, last_result)
         print("LLM decision:", decision)
@@ -356,14 +369,26 @@ async def run_agent(ctx: Any, *, task: str = TASK, max_cycles: int = 24) -> Agen
         verified = await verify_outcome(ctx, decision, action_result)
         update_memory(memory, observation, decision, verified)
         last_result = verified
+        if tracker is not None:
+            reason = tracker.stop_reason(memory.delivered_count)
+            if reason is not None:
+                tracker.mark_ended(reason)
+                print(f"Completion target reached after cycle action: {reason}.")
+                break
 
+    if tracker is not None:
+        tracker.print_summary(memory.delivered_count)
     return memory
 
 
 async def run(ctx: Any) -> None:
     print(TASK)
     print("Running Level 0 full-state project starter")
-    memory = await run_agent(ctx)
+    memory = await run_agent(
+        ctx,
+        max_cycles=10_000,
+        completion=CompletionConfig(level=0, max_elapsed_s=600),
+    )
     print("\nRun complete.")
     print(f"Delivered count: {memory.delivered_count}")
     print("Logs:")

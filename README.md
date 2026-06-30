@@ -22,21 +22,55 @@ Use this option if you want to complete the workshop entirely in a notebook. You
 not need to clone the repository, install Python locally, or set up the IDE scaffold.
 
 1. Open the English or Korean notebook for the workshop.
-2. Upload it to Google Colab, or open it in your preferred notebook environment.
-3. Follow the setup cells in the notebook to install packages and configure your API
+2. Upload it to Google Drive and open it in Google Colab.
+3. Run the first setup cell. It installs `menlo_runner` from the GitHub repository.
+4. Follow the setup cells in the notebook to configure your API
    keys. In Colab, store keys in the Secrets manager rather than writing them into a
    notebook cell.
-4. Open the printed viewer URL in Google Chrome when instructed.
+5. Open the printed viewer URL in Google Chrome when instructed.
+6. Fill in the TODO sections inside the notebook.
+7. Run the final project cell. Project starter notebooks run the 10-minute scored
+   simulation by default.
 
 Required Colab secret names:
 
 - `MENLO_API_KEY`: your Menlo API key from `platform.menlo.ai` -> Settings -> API Keys
 - `TOKAMAK_API_KEY`: required for Workshop 4 and all project starter agents
 
-### Option 2: Local IDE Scaffold
+### Option 2: Local IDE With Starter Notebooks
 
-Use this option if you prefer VS Code, PyCharm, or another local IDE. Clone this
-repository and use the reusable modules under `menlo_runner/`.
+Use this option when the repository is cloned locally, but you still want to work
+mainly inside the project notebook files from `notebooks/project/`.
+
+1. Clone this repository.
+2. Install the local package from the repository folder with `py -m pip install -e .`.
+3. Open a project notebook from `notebooks/project/` in your IDE.
+4. Run the API key and robot context cells.
+5. Open the printed Menlo viewer URL in Chrome.
+6. Fill in the TODO sections in the notebook or edit the matching Python starter.
+7. Run the final project cell. It uses the local cloned code and runs the
+   10-minute scored simulation by default.
+
+In this workflow, local edits to `menlo_runner/` are available to the notebook
+because the package is installed in editable mode.
+
+### Option 3: Local IDE With Python Starters
+
+Use this option when you want to edit `.py` starter files directly and run them
+from a terminal or IDE run configuration.
+
+1. Clone this repository.
+2. Install the local package from the repository folder with `py -m pip install -e .`.
+3. Fill in the TODO sections in one of the Python starters under
+   `menlo_runner/programs/project/`.
+4. Run the matching starter command from a terminal, for example
+   `py -m menlo_runner.cli level-1-starter`.
+5. Open the printed Menlo viewer URL in Chrome.
+
+Project starter commands run the same 10-minute scored simulation used by the
+starter notebooks. Delivery points are uncapped: Level 0 gives 10 points per
+delivery, Level 1 gives 20 points per delivery, and Level 2 gives 30 points per
+delivery.
 
 ## Local IDE Setup
 

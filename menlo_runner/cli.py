@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import inspect
 import importlib
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from menlo_runner.basics import print_position, screenshot
@@ -34,6 +35,12 @@ PROGRAMS = {
     "level-1-starter-ko": ("menlo_runner.programs.project.ko.level_1_starter_ko", True),
     "level-2-starter-ko": ("menlo_runner.programs.project.ko.level_2_starter_ko", True),
 }
+
+
+@dataclass(frozen=True)
+class ProgramSpec:
+    module_name: str
+    require_tokamak: bool
 
 
 def _load_program(module_name: str) -> Program:
@@ -62,6 +69,13 @@ def _program_requires_tokamak(module_name: str) -> bool:
     return False
 
 
+def _program_spec(program_name: str) -> ProgramSpec:
+    if program_name in PROGRAMS:
+        module_name, require_tokamak = PROGRAMS[program_name]
+        return ProgramSpec(module_name=module_name, require_tokamak=require_tokamak)
+    return ProgramSpec(module_name=program_name, require_tokamak=False)
+
+
 async def _run_program_in_existing_context(ctx: Any, module_name: str) -> None:
     if _program_requires_tokamak(module_name) and not ctx.config.tokamak_api_key:
         print("This program requires TOKAMAK_API_KEY. Add it to .env and start a new session.")
@@ -70,48 +84,70 @@ async def _run_program_in_existing_context(ctx: Any, module_name: str) -> None:
     await program(ctx)
 
 
-async def _run_completion(
+async def _run_completion_in_existing_context(
+    ctx: Any,
     program_name: str,
     *,
+    level: int | None,
     max_delivered_cubes: int | None,
     max_elapsed_s: float | None,
-    max_cycles: int,
+    max_cycles: int | None,
 ) -> None:
-    if program_name not in PROGRAMS:
-        raise RuntimeError(f"Unknown program '{program_name}'. Try one of: {', '.join(PROGRAMS)}")
-
     completion = CompletionConfig(
-        level=level_from_program_name(program_name),
+        level=level if level is not None else level_from_program_name(program_name),
         max_delivered_cubes=max_delivered_cubes,
         max_elapsed_s=max_elapsed_s,
     )
-    module_name, require_tokamak = PROGRAMS[program_name]
-    config = load_config(require_tokamak=require_tokamak)
+    spec = _program_spec(program_name)
+    if spec.require_tokamak and not ctx.config.tokamak_api_key:
+        print("This program requires TOKAMAK_API_KEY. Add it to .env and start a new session.")
+        return
+
+    module = importlib.import_module(spec.module_name)
+    run_agent = getattr(module, "run_agent", None)
+    if run_agent is None:
+        raise RuntimeError(f"{program_name} does not expose run_agent(ctx, ...).")
+
+    signature = inspect.signature(run_agent)
+    if "completion" not in signature.parameters:
+        raise RuntimeError(
+            f"{program_name} does not support completion runs yet. "
+            "Add a completion parameter to its run_agent function."
+        )
+
+    kwargs: dict[str, Any] = {"completion": completion}
+    if max_cycles is not None and "max_cycles" in signature.parameters:
+        kwargs["max_cycles"] = max_cycles
+    if "task" in signature.parameters:
+        resolve_task = getattr(module, "resolve_task", None)
+        task = resolve_task(ctx) if resolve_task is not None else getattr(module, "TASK", "")
+        kwargs["task"] = task
+        if task:
+            print(task)
+    print(f"Running completion wrapper for {program_name}")
+    await run_agent(ctx, **kwargs)
+
+
+async def _run_completion(
+    program_name: str,
+    *,
+    level: int | None,
+    max_delivered_cubes: int | None,
+    max_elapsed_s: float | None,
+    max_cycles: int | None,
+) -> None:
+    spec = _program_spec(program_name)
+    config = load_config(require_tokamak=spec.require_tokamak)
     ctx = await open_robot_context(config, name_prefix=f"complete-{program_name}")
     try:
-        module = importlib.import_module(module_name)
-        run_agent = getattr(module, "run_agent", None)
-        if run_agent is None:
-            raise RuntimeError(f"{program_name} does not expose run_agent(ctx, ...).")
-
-        signature = inspect.signature(run_agent)
-        if "completion" not in signature.parameters:
-            raise RuntimeError(
-                f"{program_name} does not support completion runs yet. "
-                "Add a completion parameter to its run_agent function."
-            )
-
-        kwargs: dict[str, Any] = {"completion": completion}
-        if "max_cycles" in signature.parameters:
-            kwargs["max_cycles"] = max_cycles
-        if "task" in signature.parameters:
-            resolve_task = getattr(module, "resolve_task", None)
-            task = resolve_task(ctx) if resolve_task is not None else getattr(module, "TASK", "")
-            kwargs["task"] = task
-            if task:
-                print(task)
-        print(f"Running completion wrapper for {program_name}")
-        await run_agent(ctx, **kwargs)
+        await _run_completion_in_existing_context(
+            ctx,
+            program_name,
+            level=level,
+            max_delivered_cubes=max_delivered_cubes,
+            max_elapsed_s=max_elapsed_s,
+            max_cycles=max_cycles,
+        )
     finally:
         await ctx.close()
         print("Cleaned up robot and closed the client.")
@@ -124,6 +160,7 @@ Commands:
   programs                 List built-in programs
   run <program>            Run a built-in program
   custom <module>          Run a custom module with async def run(ctx)
+  complete <program>       Run a built-in program/module with completion scoring
   scene                    Print a text summary of robot, pads, and cubes
   position                 Print robot position and status
   screenshot [path]        Save the robot POV image
@@ -188,6 +225,20 @@ async def _interactive_session() -> None:
                         print("Usage: custom <module>")
                         continue
                     await _run_program_in_existing_context(ctx, args[0])
+                elif command == "complete":
+                    parser = build_completion_parser()
+                    try:
+                        complete_args = parser.parse_args(args)
+                    except SystemExit:
+                        continue
+                    await _run_completion_in_existing_context(
+                        ctx,
+                        complete_args.program,
+                        level=complete_args.level,
+                        max_delivered_cubes=complete_args.cubes,
+                        max_elapsed_s=complete_args.seconds,
+                        max_cycles=complete_args.max_cycles,
+                    )
                 else:
                     print(f"Unknown command '{command}'. Type 'help'.")
             except Exception as exc:
@@ -195,6 +246,43 @@ async def _interactive_session() -> None:
     finally:
         await ctx.close()
         print("Cleaned up robot and closed the client.")
+
+
+def build_completion_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="complete",
+        description="Run a project program with scoring and the simulation time cap.",
+    )
+    parser.add_argument(
+        "program",
+        help="Built-in program name or import path, for example level-0-starter.",
+    )
+    parser.add_argument(
+        "--level",
+        type=int,
+        choices=(0, 1, 2),
+        default=None,
+        help="Project level for scoring. Omit to infer from the program name.",
+    )
+    parser.add_argument(
+        "--cubes",
+        type=int,
+        default=None,
+        help="Optional stop target for delivered cubes. Omit for no cube cap.",
+    )
+    parser.add_argument(
+        "--seconds",
+        type=float,
+        default=600.0,
+        help="Stop after this many seconds from the first agent cycle start (default: 600).",
+    )
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=10_000,
+        help="Maximum agent cycles before stopping (default: 10000).",
+    )
+    return parser
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -216,7 +304,17 @@ def build_parser() -> argparse.ArgumentParser:
         "complete",
         help="Run a project program with scoring and the simulation time cap.",
     )
-    complete.add_argument("program", choices=sorted(PROGRAMS), help="Built-in project program to run.")
+    complete.add_argument(
+        "program",
+        help="Built-in program name or import path, for example level-0-starter.",
+    )
+    complete.add_argument(
+        "--level",
+        type=int,
+        choices=(0, 1, 2),
+        default=None,
+        help="Project level for scoring. Omit to infer from the program name.",
+    )
     complete.add_argument(
         "--cubes",
         type=int,
@@ -233,7 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-cycles",
         type=int,
         default=10_000,
-        help="Safety cap for agent cycles. Default: 10000.",
+        help="Maximum agent cycles before stopping (default: 10000).",
     )
 
     subparsers.add_parser(
@@ -258,6 +356,7 @@ def main() -> None:
             asyncio.run(
                 _run_completion(
                     args.program,
+                    level=args.level,
                     max_delivered_cubes=args.cubes,
                     max_elapsed_s=args.seconds,
                     max_cycles=args.max_cycles,

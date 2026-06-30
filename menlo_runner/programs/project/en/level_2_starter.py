@@ -514,7 +514,7 @@ async def execute_decision(
 async def run_agent(
     ctx: Any,
     *,
-    max_cycles: int = 20,
+    max_cycles: int = 10_000,
     completion: CompletionConfig | None = None,
 ) -> AgentMemory:
     """Thin observe-LLM-act loop. Edit the TODO functions, not just this loop."""

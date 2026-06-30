@@ -56,6 +56,8 @@ class CompletionTracker:
         self.started_at: float | None = None
         self.ended_at: float | None = None
         self.end_reason: str | None = None
+        self._active_cube_ids: set[str] = set()
+        self._delivered_cube_ids: set[str] = set()
 
     def start_first_cycle(self) -> None:
         if self.started_at is None:
@@ -78,10 +80,32 @@ class CompletionTracker:
         return None
 
     async def scene_delivered_count(self, ctx: Any) -> int:
-        """Read authoritative delivered-cube progress from scene_state."""
-        from menlo_runner.scene import delivered_cube_ids
+        """Track delivered cubes from scene-state transitions.
 
-        return len(await delivered_cube_ids(ctx))
+        The simulator keeps hidden reserve cubes in ``scene_state`` as
+        ``visible=False``. Counting all invisible cubes inflates delivery
+        progress, so this tracker only counts a cube after it has first been
+        active in the run (visible or held) and later becomes invisible.
+        """
+        scene = await ctx.state("scene_state")
+
+        for entity_key, entity in scene.entities.items():
+            entity_id = getattr(entity, "entity_id", entity_key)
+            if not isinstance(entity_id, str) or not entity_id.startswith("cube_"):
+                continue
+
+            visible = bool(getattr(entity, "visible", False))
+            attached_to = getattr(entity, "attached_to", None)
+            is_active = visible or attached_to is not None
+
+            if is_active:
+                self._active_cube_ids.add(entity_id)
+                continue
+
+            if entity_id in self._active_cube_ids:
+                self._delivered_cube_ids.add(entity_id)
+
+        return len(self._delivered_cube_ids)
 
     async def stop_reason_from_scene(self, ctx: Any) -> str | None:
         """Check stop conditions using authoritative scene progress."""

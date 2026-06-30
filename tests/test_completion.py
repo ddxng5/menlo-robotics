@@ -16,18 +16,28 @@ class FakeClock:
         self.now += seconds
 
 
+def cube_state(
+    *,
+    entity_id: str,
+    visible: bool,
+    attached_to: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(entity_id=entity_id, visible=visible, attached_to=attached_to)
+
+
 class FakeSceneContext:
+    def __init__(self, entities=None) -> None:
+        self.entities = entities or {
+            "cube_0": cube_state(entity_id="cube_0", visible=False),
+            "cube_pool_0": cube_state(entity_id="cube_pool_0", visible=False),
+            "cube_1": cube_state(entity_id="cube_1", visible=True),
+            "robot": SimpleNamespace(visible=True),
+        }
+
     async def state(self, name: str):
         if name != "scene_state":
             raise AssertionError(f"unexpected state read: {name}")
-        return SimpleNamespace(
-            entities={
-                "cube_0": SimpleNamespace(visible=False),
-                "cube_pool_0": SimpleNamespace(visible=False),
-                "cube_1": SimpleNamespace(visible=True),
-                "robot": SimpleNamespace(visible=True),
-            }
-        )
+        return SimpleNamespace(entities=self.entities)
 
 
 class CompletionConfigTest(unittest.TestCase):
@@ -85,10 +95,58 @@ class CompletionTrackerTest(unittest.TestCase):
 
         self.assertEqual(tracker.delivery_score(delivered_count=5), 150)
 
-    def test_stop_reason_from_scene_uses_authoritative_delivered_count(self):
-        tracker = CompletionTracker(CompletionConfig(max_delivered_cubes=2))
+    def test_scene_delivered_count_ignores_initial_hidden_pool_cubes(self):
+        tracker = CompletionTracker(CompletionConfig(max_delivered_cubes=1))
+        ctx = FakeSceneContext()
 
-        reason = asyncio.run(tracker.stop_reason_from_scene(FakeSceneContext()))
+        delivered_count = asyncio.run(tracker.scene_delivered_count(ctx))
+
+        self.assertEqual(delivered_count, 0)
+
+    def test_scene_delivered_count_tracks_active_cube_that_disappears(self):
+        tracker = CompletionTracker(CompletionConfig(max_delivered_cubes=1))
+        entities = {
+            "cube_0": cube_state(entity_id="cube_0", visible=True),
+            "cube_pool_0": cube_state(entity_id="cube_pool_0", visible=False),
+            "robot": SimpleNamespace(visible=True),
+        }
+        ctx = FakeSceneContext(entities)
+
+        self.assertEqual(asyncio.run(tracker.scene_delivered_count(ctx)), 0)
+        entities["cube_0"] = cube_state(entity_id="cube_0", visible=False)
+
+        self.assertEqual(asyncio.run(tracker.scene_delivered_count(ctx)), 1)
+
+    def test_scene_delivered_count_tracks_pool_cube_after_it_becomes_active(self):
+        tracker = CompletionTracker(CompletionConfig(max_delivered_cubes=1))
+        entities = {
+            "cube_pool_0": cube_state(entity_id="cube_pool_0", visible=False),
+            "robot": SimpleNamespace(visible=True),
+        }
+        ctx = FakeSceneContext(entities)
+
+        self.assertEqual(asyncio.run(tracker.scene_delivered_count(ctx)), 0)
+        entities["cube_pool_0"] = cube_state(entity_id="cube_pool_0", visible=True)
+        self.assertEqual(asyncio.run(tracker.scene_delivered_count(ctx)), 0)
+        entities["cube_pool_0"] = cube_state(entity_id="cube_pool_0", visible=False)
+
+        self.assertEqual(asyncio.run(tracker.scene_delivered_count(ctx)), 1)
+
+    def test_stop_reason_from_scene_uses_tracked_delivered_count(self):
+        tracker = CompletionTracker(CompletionConfig(max_delivered_cubes=2))
+        entities = {
+            "cube_0": cube_state(entity_id="cube_0", visible=True),
+            "cube_1": cube_state(entity_id="cube_1", visible=True),
+            "cube_pool_0": cube_state(entity_id="cube_pool_0", visible=False),
+            "robot": SimpleNamespace(visible=True),
+        }
+        ctx = FakeSceneContext(entities)
+
+        self.assertIsNone(asyncio.run(tracker.stop_reason_from_scene(ctx)))
+        entities["cube_0"] = cube_state(entity_id="cube_0", visible=False)
+        self.assertIsNone(asyncio.run(tracker.stop_reason_from_scene(ctx)))
+        entities["cube_1"] = cube_state(entity_id="cube_1", visible=False)
+        reason = asyncio.run(tracker.stop_reason_from_scene(ctx))
 
         self.assertEqual(reason, "delivered 2/2 cubes")
 

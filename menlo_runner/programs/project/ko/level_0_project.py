@@ -51,6 +51,10 @@ MAX_ATTEMPTS_PER_TARGET = 3
 # LLM 응답이 계속 invalid할 때 deterministic fallback으로 넘어가기 전 재시도 횟수.
 DECISION_RETRY_LIMIT = 2
 
+# 한 번의 LLM decision cycle에서 deterministic executor가 연속 배송할 cube 수.
+DEFAULT_BATCH_LIMIT = 10
+MAX_BATCH_LIMIT = 30
+
 AGENT_SYSTEM_PROMPT = (
     "You are the high-level task supervisor for a warehouse sorting robot.\n"
     f"Task: {TASK}\n"
@@ -59,12 +63,15 @@ AGENT_SYSTEM_PROMPT = (
     "Reply with ONLY one JSON object and nothing else, matching this schema:\n"
     '{"next_action": "<action>", "target_color": "<color or null>", '
     '"target_entity_id": "<entity id or null>", "reason": "<short reason>", '
-    '"recovery_strategy": "<optional string or null>"}\n'
+    '"recovery_strategy": "<optional string or null>", "batch_limit": <integer>}\n'
     f"Allowed next_action values: {sorted(ALLOWED_NEXT_ACTIONS)}.\n"
-    "Strategy: prefer the nearest visible cube that is not yet completed or skipped, "
-    "navigate to it, pick it, then navigate to the pad matching its color and place it. "
-    "Use recover when the previous action result looks wrong, and skip_target when a "
-    "cube keeps failing so the robot does not get stuck."
+    "Your role is strategy, policy, and recovery. Do not micromanage one low-level "
+    "robot action at a time. When available cubes can be delivered, choose "
+    "next_action='navigate_to_cube' as permission for the deterministic executor to "
+    "run a full batch loop: observe cube, navigate, pick, choose matching pad, "
+    "navigate, place, verify, then repeat. Use batch_limit=10 normally. Use recover "
+    "when the previous batch ended blocked, skip_target when a specific cube keeps "
+    "failing, and stop only when the task is complete or no useful action remains."
 )
 
 
@@ -77,6 +84,7 @@ class AgentDecision:
     target_entity_id: str | None = None
     reason: str = ""
     recovery_strategy: str | None = None
+    batch_limit: int = DEFAULT_BATCH_LIMIT
 
 
 @dataclass
@@ -84,6 +92,8 @@ class AgentMemory:
     """observe-decide-act cycle 사이에 agent가 유지하는 상태입니다."""
 
     delivered_count: int = 0
+    llm_decision_count: int = 0
+    batch_cycles: int = 0
     held_color: str | None = None
     held_entity_id: str | None = None
     active_cube_id: str | None = None
@@ -137,12 +147,18 @@ def parse_agent_decision(text: str) -> AgentDecision | None:
     if target_entity_id is not None and not isinstance(target_entity_id, str):
         return None
 
+    batch_limit = data.get("batch_limit", DEFAULT_BATCH_LIMIT)
+    if not isinstance(batch_limit, int):
+        return None
+    batch_limit = max(1, min(batch_limit, MAX_BATCH_LIMIT))
+
     return AgentDecision(
         next_action=next_action,
         target_color=target_color,
         target_entity_id=target_entity_id,
         reason=str(data.get("reason", "")),
         recovery_strategy=data.get("recovery_strategy"),
+        batch_limit=batch_limit,
     )
 
 
@@ -161,6 +177,8 @@ def build_decision_context(
         "color_to_pad": observation.color_to_pad,
         "memory": {
             "delivered_count": memory.delivered_count,
+            "llm_decision_count": memory.llm_decision_count,
+            "batch_cycles": memory.batch_cycles,
             "held_color": memory.held_color,
             "held_entity_id": memory.held_entity_id,
             "active_cube_id": memory.active_cube_id,
@@ -172,6 +190,13 @@ def build_decision_context(
         },
         "last_result": last_result,
         "note": observation.note,
+        "decision_policy": {
+            "llm_role": "strategy_policy_recovery",
+            "code_role": "repeat deterministic cube delivery inside each batch",
+            "batch_signal": "Use next_action='navigate_to_cube' to start or continue a batch.",
+            "default_batch_limit": DEFAULT_BATCH_LIMIT,
+            "max_batch_limit": MAX_BATCH_LIMIT,
+        },
     }
 
 
@@ -289,6 +314,8 @@ def validate_decision(decision: AgentDecision, observation: Observation, memory:
         return False
     if decision.target_color is not None and decision.target_color not in DESTINATION_SIGN_RULES:
         return False
+    if decision.batch_limit < 1 or decision.batch_limit > MAX_BATCH_LIMIT:
+        return False
 
     held = observation.held_cube
     visible_ids = {cube["entity_id"] for cube in observation.visible_cubes}
@@ -332,6 +359,7 @@ def fallback_decision(observation: Observation, memory: AgentMemory) -> AgentDec
             target_color=held["color"],
             target_entity_id=held["entity_id"],
             reason="fallback: cube를 들고 있어 matching pad로 이동합니다.",
+            batch_limit=1,
         )
 
     if memory.stage == "cube_targeted" and memory.active_cube_id:
@@ -340,6 +368,7 @@ def fallback_decision(observation: Observation, memory: AgentMemory) -> AgentDec
             target_color=memory.active_color,
             target_entity_id=memory.active_cube_id,
             reason="fallback: 이미 target으로 삼은 cube를 pick 시도합니다.",
+            batch_limit=1,
         )
 
     candidate = choose_target_cube(observation, memory)
@@ -348,10 +377,15 @@ def fallback_decision(observation: Observation, memory: AgentMemory) -> AgentDec
             next_action="navigate_to_cube",
             target_color=candidate["color"],
             target_entity_id=candidate["entity_id"],
-            reason="fallback: 가장 가까운 available cube로 이동합니다.",
+            reason="fallback: 가장 가까운 available cube부터 batch 배송을 시작합니다.",
+            batch_limit=DEFAULT_BATCH_LIMIT,
         )
 
-    return AgentDecision(next_action="search_cube", reason="fallback: 현재 available cube가 없어 재탐색합니다.")
+    return AgentDecision(
+        next_action="search_cube",
+        reason="fallback: 현재 available cube가 없어 재탐색합니다.",
+        batch_limit=1,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +415,7 @@ async def decide_next_action(
 
         decision = parse_agent_decision(raw_reply)
         if decision is not None and validate_decision(decision, observation, memory):
+            memory.llm_decision_count += 1
             return decision
 
         memory.logs.append(
@@ -392,6 +427,7 @@ async def decide_next_action(
         )
 
     fallback = fallback_decision(observation, memory)
+    memory.llm_decision_count += 1
     memory.logs.append({"event": "fallback_decision_used", "decision": fallback.__dict__})
     return fallback
 
@@ -417,7 +453,8 @@ async def observe_world(ctx: Any, memory: AgentMemory) -> Observation:
     observation.note = (
         f"available_cubes={len(observation.visible_cubes)}, "
         f"completed={len(memory.completed_cube_ids)}, skipped={len(memory.skipped_cube_ids)}, "
-        f"stage={memory.stage}"
+        f"stage={memory.stage}, llm_decisions={memory.llm_decision_count}, "
+        f"batch_cycles={memory.batch_cycles}"
     )
     return observation
 
@@ -444,13 +481,110 @@ async def execute_decision(
         }
 
     if action == "navigate_to_cube":
-        cube = resolve_cube_target(decision, observation, memory)
-        if cube is None:
-            return {"action": action, "status": "invalid_target", "error": "no available cube target"}
-        result = await go_to_entity(ctx, cube["entity_id"])
-        summary = result_summary(result)
-        summary.update({"action": action, "target_entity_id": cube["entity_id"], "target_color": cube["color"]})
-        return summary
+        batch_limit = max(1, min(decision.batch_limit, MAX_BATCH_LIMIT))
+        delivered_ids: list[str] = []
+        skipped_ids: list[str] = []
+        attempts: list[dict[str, Any]] = []
+        blocked_error: str | None = None
+
+        for _ in range(batch_limit):
+            current = await observe_full_state(ctx)
+            excluded_ids = (
+                set(memory.completed_cube_ids)
+                | set(memory.skipped_cube_ids)
+                | set(delivered_ids)
+                | set(skipped_ids)
+            )
+            current.visible_cubes = [
+                cube for cube in current.visible_cubes if cube["entity_id"] not in excluded_ids
+            ]
+
+            held = current.held_cube
+            if held:
+                cube_id = held["entity_id"]
+                color = held["color"]
+                step = {"cube_id": cube_id, "color": color, "started_held": True}
+            else:
+                cube = choose_target_cube(current, memory)
+                if cube is None:
+                    break
+
+                cube_id = cube["entity_id"]
+                color = cube["color"]
+                step = {"cube_id": cube_id, "color": color, "started_held": False}
+
+                navigate_result = await go_to_entity(ctx, cube_id)
+                step["navigate_to_cube"] = result_summary(navigate_result)
+                if step["navigate_to_cube"].get("error"):
+                    blocked_error = step["navigate_to_cube"]["error"]
+                    skipped_ids.append(cube_id)
+                    attempts.append(step)
+                    continue
+
+                pick_result = await pick_cube_by_id(ctx, cube_id)
+                step["pick_cube"] = result_summary(pick_result)
+                after_pick = await observe_full_state(ctx)
+                held_after_pick = after_pick.held_cube
+                if (
+                    step["pick_cube"].get("error")
+                    or held_after_pick is None
+                    or held_after_pick["entity_id"] != cube_id
+                ):
+                    blocked_error = step["pick_cube"].get("error") or "pick did not attach cube"
+                    skipped_ids.append(cube_id)
+                    attempts.append(step)
+                    continue
+
+                color = held_after_pick["color"]
+                step["color"] = color
+
+            pad_id = COLOR_TO_PAD.get(color)
+            if pad_id is None:
+                blocked_error = f"no matching pad for color {color}"
+                attempts.append(step)
+                break
+
+            navigate_pad_result = await go_to_entity(ctx, pad_id)
+            step["navigate_to_pad"] = result_summary(navigate_pad_result)
+            step["target_pad_id"] = pad_id
+            if step["navigate_to_pad"].get("error"):
+                blocked_error = step["navigate_to_pad"]["error"]
+                attempts.append(step)
+                break
+
+            place_result = await place_on_pad_by_id(ctx, pad_id)
+            step["place_cube"] = result_summary(place_result)
+            after_place = await observe_full_state(ctx)
+            delivered = step["place_cube"].get("error") is None and after_place.held_cube is None
+            step["delivered"] = delivered
+            attempts.append(step)
+
+            if delivered:
+                delivered_ids.append(cube_id)
+                continue
+
+            blocked_error = step["place_cube"].get("error") or "place did not release cube"
+            break
+
+        if delivered_ids:
+            status = "batch_complete" if len(delivered_ids) >= batch_limit else "batch_partial"
+        elif blocked_error:
+            status = "blocked"
+        else:
+            status = "no_available_cube"
+
+        return {
+            "action": "batch_delivery",
+            "requested_action": action,
+            "status": status,
+            "batch_limit": batch_limit,
+            "deliveries": len(delivered_ids),
+            "delivered_cube_ids": delivered_ids,
+            "skipped_cube_ids": skipped_ids,
+            "attempts": attempts,
+            "last_error": blocked_error,
+            "error": blocked_error if not delivered_ids and blocked_error else None,
+        }
 
     if action == "pick_cube":
         cube = resolve_cube_target(decision, observation, memory)
@@ -537,7 +671,30 @@ def update_memory(
         memory.held_entity_id = None
         memory.held_color = None
 
-    if action == "navigate_to_cube":
+    if action_result.get("action") == "batch_delivery":
+        for cube_id in action_result.get("delivered_cube_ids", []):
+            if cube_id not in memory.completed_cube_ids:
+                memory.completed_cube_ids.append(cube_id)
+                memory.delivered_count += 1
+            memory.failed_attempts.pop(cube_id, None)
+
+        for cube_id in action_result.get("skipped_cube_ids", []):
+            if cube_id not in memory.completed_cube_ids and cube_id not in memory.skipped_cube_ids:
+                memory.skipped_cube_ids.append(cube_id)
+            if cube_id not in memory.completed_cube_ids:
+                memory.failed_attempts[cube_id] = memory.failed_attempts.get(cube_id, 0) + 1
+
+        memory.batch_cycles += 1
+        if memory.held_entity_id:
+            memory.active_cube_id = memory.held_entity_id
+            memory.active_color = memory.held_color
+            memory.stage = "need_pad"
+        else:
+            memory.active_cube_id = None
+            memory.active_color = None
+            memory.stage = "need_cube"
+
+    elif action == "navigate_to_cube":
         target_id = action_result.get("target_entity_id")
         if target_id and action_result.get("error") is None:
             memory.active_cube_id = target_id
@@ -610,6 +767,11 @@ def update_memory(
             "stage": memory.stage,
             "held_color": memory.held_color,
             "delivered_count": memory.delivered_count,
+            "llm_decision_count": memory.llm_decision_count,
+            "batch_cycles": memory.batch_cycles,
+            "deliveries_this_cycle": action_result.get("deliveries", 0),
+            "batch_status": action_result.get("status"),
+            "last_error": action_result.get("last_error") or action_result.get("error"),
             "visible_cube_count": len(observation.visible_cubes),
             "skipped_cube_ids": list(memory.skipped_cube_ids),
             "action_ok": verified.get("action_ok"),
@@ -624,13 +786,16 @@ async def run_agent(
     max_cycles: int = 10_000,
     completion: CompletionConfig | None = None,
 ) -> AgentMemory:
-    """얇은 observe-LLM-act loop입니다. 이 loop만이 아니라 TODO 함수들을 수정하세요."""
+    """LLM strategy cycle마다 deterministic batch delivery를 실행합니다.
+
+    여기서 max_cycles는 low-level robot action 수가 아니라 LLM batch decision 수입니다.
+    """
     memory = AgentMemory()
     last_result: dict[str, Any] | None = None
     tracker = CompletionTracker(completion) if completion is not None else None
 
     for cycle in range(1, max_cycles + 1):
-        print(f"\n[Level 0] Cycle {cycle}")
+        print(f"\n[Level 0] LLM batch cycle {cycle}")
         if tracker is not None:
             first_cycle = tracker.started_at is None
             tracker.start_first_cycle()

@@ -46,13 +46,15 @@ ALLOWED_NEXT_ACTIONS = {
 }
 
 # 같은 cube target에 대한 pick/place 실패가 이 횟수를 넘으면 skip 처리한다.
-MAX_ATTEMPTS_PER_TARGET = 3
+# 실패한 cube를 오래 붙잡지 않도록 낮게 유지한다.
+MAX_ATTEMPTS_PER_TARGET = 2
 
 # LLM 응답이 계속 invalid할 때 deterministic fallback으로 넘어가기 전 재시도 횟수.
 DECISION_RETRY_LIMIT = 2
 
 # 한 번의 LLM decision cycle에서 deterministic executor가 연속 배송할 cube 수.
-DEFAULT_BATCH_LIMIT = 10
+# LLM 왕복 횟수를 줄이기 위해 기본값을 상한과 같게 크게 유지한다.
+DEFAULT_BATCH_LIMIT = 30
 MAX_BATCH_LIMIT = 30
 
 AGENT_SYSTEM_PROMPT = (
@@ -69,7 +71,9 @@ AGENT_SYSTEM_PROMPT = (
     "robot action at a time. When available cubes can be delivered, choose "
     "next_action='navigate_to_cube' as permission for the deterministic executor to "
     "run a full batch loop: observe cube, navigate, pick, choose matching pad, "
-    "navigate, place, verify, then repeat. Use batch_limit=10 normally. Use recover "
+    "navigate, place, verify, then repeat. Use a large batch_limit (up to 30) whenever "
+    "cubes are available so the executor keeps delivering without asking you again; "
+    "only lower it when recovering from repeated failures. Use recover "
     "when the previous batch ended blocked, skip_target when a specific cube keeps "
     "failing, and stop only when the task is complete or no useful action remains."
 )
@@ -508,9 +512,15 @@ async def execute_decision(
         skipped_ids: list[str] = []
         attempts: list[dict[str, Any]] = []
         blocked_error: str | None = None
+        robot_fallen = False
 
         for _ in range(batch_limit):
             current = await observe_full_state(ctx)
+            robot_state = getattr(current.robot_status, "robot", None)
+            if robot_state is not None and getattr(robot_state, "status", None) == "fallen":
+                robot_fallen = True
+                blocked_error = "robot fallen"
+                break
             excluded_ids = (
                 set(memory.completed_cube_ids)
                 | set(memory.skipped_cube_ids)
@@ -611,6 +621,7 @@ async def execute_decision(
             "attempts": attempts,
             "last_error": blocked_error,
             "error": blocked_error if not delivered_ids and blocked_error else None,
+            "robot_fallen": robot_fallen,
         }
 
     if action == "pick_cube":
@@ -818,11 +829,14 @@ async def run_agent(
 ) -> AgentMemory:
     """LLM strategy cycle마다 deterministic batch delivery를 실행합니다.
 
-    여기서 max_cycles는 low-level robot action 수가 아니라 LLM batch decision 수입니다.
+    여기서 max_cycles는 low-level robot action 수가 아니라 loop 반복 수입니다.
+    visible cube가 남아있는 동안은 같은 navigate_to_cube 결정을 재사용해 LLM을
+    다시 호출하지 않으므로, 실제 LLM decision 횟수는 max_cycles보다 훨씬 적습니다.
     """
     memory = AgentMemory()
     last_result: dict[str, Any] | None = None
     tracker = CompletionTracker(completion) if completion is not None else None
+    decision: AgentDecision | None = None
 
     for cycle in range(1, max_cycles + 1):
         print(f"\n[Level 0] Cycle {cycle}")
@@ -838,13 +852,36 @@ async def run_agent(
                 break
 
         observation = await observe_world(ctx, memory)
-        decision = await decide_next_action(task, observation, memory, last_result)
-        print("LLM decision:", decision)
+
+        robot_state = getattr(observation.robot_status, "robot", None)
+        if robot_state is not None and getattr(robot_state, "status", None) == "fallen":
+            memory.logs.append({"event": "robot_fallen", "cycle": cycle})
+            print("로봇이 넘어져 실행을 즉시 종료합니다.")
+            break
+
+        # 직전 결정이 navigate_to_cube였고 아직 visible cube가 남아있다면,
+        # 정책은 바뀔 이유가 없으므로 LLM을 다시 부르지 않고 같은 결정을 재사용한다.
+        reuse_decision = (
+            decision is not None
+            and decision.next_action == "navigate_to_cube"
+            and bool(observation.visible_cubes)
+        )
+        if reuse_decision:
+            print("LLM 호출 생략 (visible cube 존재, 동일 batch 계속):", decision)
+        else:
+            decision = await decide_next_action(task, observation, memory, last_result)
+            print("LLM decision:", decision)
 
         if decision.next_action == "stop":
             break
 
         action_result = await execute_decision(ctx, decision, observation, memory)
+
+        if action_result.get("robot_fallen"):
+            memory.logs.append({"event": "robot_fallen", "cycle": cycle})
+            print("로봇이 넘어져 실행을 즉시 종료합니다.")
+            break
+
         verified = await verify_outcome(ctx, decision, action_result)
         update_memory(memory, observation, decision, verified)
         last_result = verified

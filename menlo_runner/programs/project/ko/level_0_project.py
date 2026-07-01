@@ -443,6 +443,25 @@ async def observe_world(ctx: Any, memory: AgentMemory) -> Observation:
     실제로 갈 수 있는 cube만 보게 합니다.
     """
     observation = await observe_full_state(ctx)
+    visible_ids = {cube["entity_id"] for cube in observation.visible_cubes}
+    incorrectly_completed = [
+        cube_id for cube_id in memory.completed_cube_ids if cube_id in visible_ids
+    ]
+    if incorrectly_completed:
+        memory.completed_cube_ids = [
+            cube_id
+            for cube_id in memory.completed_cube_ids
+            if cube_id not in incorrectly_completed
+        ]
+        memory.delivered_count = len(memory.completed_cube_ids)
+        memory.logs.append(
+            {
+                "event": "completed_memory_repaired",
+                "visible_again": incorrectly_completed,
+                "delivered_count": memory.delivered_count,
+            }
+        )
+
     excluded_ids = set(memory.completed_cube_ids) | set(memory.skipped_cube_ids)
     held_id = observation.held_cube["entity_id"] if observation.held_cube else None
     observation.visible_cubes = [
@@ -467,18 +486,21 @@ async def execute_decision(
 ) -> dict[str, Any]:
     """검증된 LLM 결정 하나를 Level 0 robot 행동으로 변환합니다."""
     action = decision.next_action
+    requested_action = action
 
     if action == "stop":
         return {"action": action, "status": "stopped"}
 
     if action == "search_cube":
         candidate = choose_target_cube(observation, memory)
-        return {
-            "action": action,
-            "status": "found" if candidate else "not_found",
-            "target_entity_id": candidate["entity_id"] if candidate else None,
-            "target_color": candidate["color"] if candidate else None,
-        }
+        if candidate is None:
+            return {
+                "action": action,
+                "status": "not_found",
+                "target_entity_id": None,
+                "target_color": None,
+            }
+        action = "navigate_to_cube"
 
     if action == "navigate_to_cube":
         batch_limit = max(1, min(decision.batch_limit, MAX_BATCH_LIMIT))
@@ -555,7 +577,12 @@ async def execute_decision(
             place_result = await place_on_pad_by_id(ctx, pad_id)
             step["place_cube"] = result_summary(place_result)
             after_place = await observe_full_state(ctx)
-            delivered = step["place_cube"].get("error") is None and after_place.held_cube is None
+            after_place_visible_ids = {cube["entity_id"] for cube in after_place.visible_cubes}
+            delivered = (
+                step["place_cube"].get("error") is None
+                and after_place.held_cube is None
+                and cube_id not in after_place_visible_ids
+            )
             step["delivered"] = delivered
             attempts.append(step)
 
@@ -575,7 +602,7 @@ async def execute_decision(
 
         return {
             "action": "batch_delivery",
-            "requested_action": action,
+            "requested_action": requested_action,
             "status": status,
             "batch_limit": batch_limit,
             "deliveries": len(delivered_ids),
@@ -679,10 +706,13 @@ def update_memory(
             memory.failed_attempts.pop(cube_id, None)
 
         for cube_id in action_result.get("skipped_cube_ids", []):
-            if cube_id not in memory.completed_cube_ids and cube_id not in memory.skipped_cube_ids:
-                memory.skipped_cube_ids.append(cube_id)
             if cube_id not in memory.completed_cube_ids:
                 memory.failed_attempts[cube_id] = memory.failed_attempts.get(cube_id, 0) + 1
+                if (
+                    memory.failed_attempts[cube_id] >= MAX_ATTEMPTS_PER_TARGET
+                    and cube_id not in memory.skipped_cube_ids
+                ):
+                    memory.skipped_cube_ids.append(cube_id)
 
         memory.batch_cycles += 1
         if memory.held_entity_id:
@@ -795,7 +825,7 @@ async def run_agent(
     tracker = CompletionTracker(completion) if completion is not None else None
 
     for cycle in range(1, max_cycles + 1):
-        print(f"\n[Level 0] LLM batch cycle {cycle}")
+        print(f"\n[Level 0] Cycle {cycle}")
         if tracker is not None:
             first_cycle = tracker.started_at is None
             tracker.start_first_cycle()
